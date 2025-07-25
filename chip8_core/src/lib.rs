@@ -1,3 +1,5 @@
+use rand::random;
+
 const FONTSET_SIZE: usize = 80;
 const FONTSET: [u8; FONTSET_SIZE] = [
     0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
@@ -234,6 +236,32 @@ impl Emu {
                 let distance = op & 0xFFF;
                 let target = (self.v_reg[0] as u16) + distance;
                 self.pc = target;
+            }
+            (0xC, _, _, _) => { //CXNN Vx = rand() & NN
+                let regx = digit2 as usize;
+                let val = (op & 0xFF) as u8;
+                let rng: u8 = random();
+                self.v_reg[regx] = rng & val;
+            }
+            (0xD, _, _, _) => //DXYN Draw sprite at (Vx, VY). 
+            // Sprite is 0xN pixels tall
+            // On/off based on value in I register
+            // Vf set if any pixels are flipped
+            {
+                let x_coord = self.v_reg[digit2 as usize];
+                let y_coord = self.v_reg[digit3 as usize];
+                let num_rows = digit4;
+
+                let mut flipped = false;
+
+                for y_line in 0..num_rows{
+                    let addr = self.i_reg + y_line as u16;
+                    let pixels = self.ram[addr as usize];
+
+                    for x_line in 0..8  {//Chip-8's sprites are always 8 pixels wide
+                        // Use a mask to fetch current pixel's bit. Only flip if a 1.
+                    }
+                }
             }
             (_, _, _, _) => unimplemented!("Unimplemented opcode: {}", op),
         }
