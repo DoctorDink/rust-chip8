@@ -1,4 +1,4 @@
-use rand::random;
+use rand::Rng;
 
 const FONTSET_SIZE: usize = 80;
 const FONTSET: [u8; FONTSET_SIZE] = [
@@ -75,11 +75,35 @@ impl Emu {
         self.ram[..FONTSET_SIZE].copy_from_slice(&FONTSET);
     }
 
+    fn push(&mut self, val: u16){
+        self.stack[self.sp as usize] = val;
+        self.sp += 1;
+    }
+
+    fn pop(&mut self) -> u16{
+        self.sp -=1;
+        self.stack[self.sp as usize]
+    }
+
     pub fn tick(&mut self){
         //FETCH
         let op = self.fetch();
         //DECODE & EXECUTE
         self.execute(op)
+    }
+
+    pub fn get_display(&self) -> &[bool] {
+        &self.screen
+    }
+
+    pub fn keypress(&mut self, index: usize, pressed: bool){
+        self.keys[index] = pressed;
+    }
+
+    pub fn load(&mut self, data: &[u8]) {
+        let start = START_ADDR as usize;
+        let end = (START_ADDR as usize) + data.len();
+        self.ram[start..end].copy_from_slice(data);
     }
 
     pub fn tick_timers(&mut self){
@@ -95,12 +119,13 @@ impl Emu {
         }
     }
 
+
     fn fetch(&mut self) -> u16 {
         let higher_byte= self.ram[self.pc as usize] as u16;
         let lower_byte = self.ram[(self.pc + 1) as usize] as u16;
         let op = (higher_byte << 8) | lower_byte;
-            self.pc += 2;
-            op
+        self.pc += 2;
+        op
     }
 
     fn execute(&mut self, op: u16) {
@@ -123,9 +148,8 @@ impl Emu {
                 self.pc = jump_addr;
             },
             (2, _, _, _) => { //2NNN Enter subroutine 0xNNN
+                let jump_addr = op & 0xFFF;                
                 self.push(self.pc);
-
-                let jump_addr = op & 0xFFF;
                 self.pc = jump_addr;
             },
             (3, _, _, _) => { //3XNN Skip if Vx register == 0xNN
@@ -142,7 +166,7 @@ impl Emu {
                     self.pc += 2; //Skip forward one opcode
                 }
             },
-            (5, _, _, 0) => { //5XY0 Skip if Vx reg = Vy reg
+            (5, _, _, _) => { //5XY0 Skip if Vx reg = Vy reg
                 let regx = digit2 as usize;
                 let regy = digit3 as usize;
                 if self.v_reg[regx] == self.v_reg[regy]{
@@ -183,6 +207,7 @@ impl Emu {
             (8, _, _, 4) => { //8XY4 Vx += VY, Sets Vf if carry
                 let regx = digit2 as usize;
                 let regy = digit3 as usize;
+
                 let (new_regx, carry) = self.v_reg[regx].overflowing_add(self.v_reg[regy]);
                 let new_vf = if carry { 1 } else { 0 };
 
@@ -192,6 +217,7 @@ impl Emu {
             (8, _, _, 5) => { //8XY5 Vx -= Vy, Clears Vf if borrow
                 let regx = digit2 as usize;
                 let regy = digit3 as usize;
+
                 let (new_regx, borrow) = self.v_reg[regx].overflowing_sub(self.v_reg[regy]);
                 let new_vf = if borrow { 0 }  else { 1 };
 
@@ -208,6 +234,7 @@ impl Emu {
             (8, _, _, 7) => { //8XY7 Vx = Vy - Vx, Clears Vf if borrow
                 let regx = digit2 as usize;
                 let regy = digit3 as usize;
+
                 let (new_regx, borrow) = self.v_reg[regy].overflowing_sub(self.v_reg[regx]);
                 let new_vf = if borrow { 0 } else { 1 };
 
@@ -224,23 +251,24 @@ impl Emu {
             (9, _, _, 0) => { //9XY0 Skip if Vx != Vy
                 let regx = digit2 as usize;
                 let regy = digit3 as usize;
+
                 if self.v_reg[regx] != self.v_reg[regy]{
                     self.pc += 2;
                 }
 
             },
             (0xA, _, _, _) => { //ANNN I reg = NNN
-                self.i_reg = op & 0xFFF;
+                let val = op & 0xFFF;
+                self.i_reg = val;
             }
             (0xB, _, _, _) => { //BNNN Jump to V0 + 0xNNN
                 let distance = op & 0xFFF;
-                let target = (self.v_reg[0] as u16) + distance;
-                self.pc = target;
+                self.pc = (self.v_reg[0] as u16) + distance;
             }
             (0xC, _, _, _) => { //CXNN Vx = rand() & NN
                 let regx = digit2 as usize;
                 let val = (op & 0xFF) as u8;
-                let rng: u8 = random();
+                let rng: u8 = rand::thread_rng().r#gen();
                 self.v_reg[regx] = rng & val;
             }
             (0xD, _, _, _) => //DXYN Draw sprite at (Vx, VY). 
@@ -248,8 +276,10 @@ impl Emu {
             // On/off based on value in I register
             // Vf set if any pixels are flipped
             {
-                let x_coord = self.v_reg[digit2 as usize];
-                let y_coord = self.v_reg[digit3 as usize];
+                let x_coord = self.v_reg[digit2 as usize] as u16;
+                let y_coord = self.v_reg[digit3 as usize] as u16;
+
+                // The last digit determines how many rows high our sprite is
                 let num_rows = digit4;
 
                 let mut flipped = false;
@@ -259,21 +289,110 @@ impl Emu {
                     let pixels = self.ram[addr as usize];
 
                     for x_line in 0..8  {//Chip-8's sprites are always 8 pixels wide
-                        // Use a mask to fetch current pixel's bit. Only flip if a 1.
+                        // Use a mask to fetch current pixel's bit. Only flip if a 1.k
+                        if (pixels & (0b1000_0000 >> x_line)) != 0 {
+                            //Sprites wrap around the screen, apply modulo operation
+                            let x = (x_coord + x_line) as usize % SCREEN_WIDTH;
+                            let y = (y_coord + y_line) as usize % SCREEN_HEIGHT;
+
+                            //Get pixel index for 1 Dimensional Screen Array
+                            let index = x + SCREEN_WIDTH * y;
+
+                            //Check if the pixel is going to be flipped to set bool
+                            flipped |= self.screen[index];
+                            self.screen[index] ^= true;
+                        }
                     }
+                }
+
+                //Populate VF register
+                if flipped {
+                    self.v_reg[0xF] = 1;
+                } else {
+                    self.v_reg[0xF] = 0;
+                }
+            },
+            (0xE, _, 9, 0xE) => { //EX9E Skip if Key (index in Vx register) is Pressed
+                let x = digit2 as usize;
+                let reg = self.v_reg[x];
+                let key = self.keys[reg as usize];
+
+                if key {self.pc += 2};
+            }
+            (0xE, _, 0xA, 1) => { //EXA1 Skip if key not pressed
+                let x = digit2 as usize;
+                let reg = self.v_reg[x];
+                let key = self.keys[reg as usize];
+
+                if !key {self.pc +=2};
+            }
+            (0xF, _, 0, 7) => { //FX07 Set Vx to DT
+                let x = digit2 as usize;
+                self.v_reg[x] = self.dt;
+            }
+            (0xF, _, 0, 0xA) => { //FX0A Wait for key press (key index in Vx reg)
+                let x = digit2 as usize;
+                let mut pressed = false;
+                
+                for i in 0..self.keys.len(){
+                    if self.keys[i]{
+                        self.v_reg[x] = i as u8;
+                        pressed = true;
+                        break;
+                    }
+                }
+
+                //Redo opcode
+                if !pressed {self.pc -= 2};
+            }
+            (0xF, _, 1, 5) => { //FX15 Set DT to Vx
+                let x = digit2 as usize;
+                self.dt = self.v_reg[x];
+            }
+            (0xF, _, 1, 8) => { //FX18 Set ST to Vx
+                let x = digit2 as usize;
+                self.st = self.v_reg[x];
+            }
+            (0xF, _, 1, 0xE) => { //FX1E Set I to I + VX, handle rollover
+                let x = digit2 as usize;
+                let reg = self.v_reg[x] as u16;
+                self.i_reg = self.i_reg.wrapping_add(reg);
+            }
+            (0xF, _, 2, 9) => { //FX29 Set I to Font Address
+                let x = digit2 as usize;
+                let char = self.v_reg[x] as u16;
+                self.i_reg = char *  5;
+            }
+            (0xF, _, 3, 3) => { //FX33 I = BCD of Vx, Used to display the decimal of a stored binary/hex number
+                let x = digit2 as usize;
+                let vx = self.v_reg[x] as f32;
+
+                // Fetch hundreds digit: Divide by 100, toss the decimal
+                let hundreds = (vx / 100.0).floor() as u8;
+                // Fetch the tens digit: Divide by 10, toss the ones digit and the decimal
+                let tens = ((vx / 10.0) % 10.0).floor() as u8;
+                // Fetch the ones digit by tossing the hundreds and the tens
+                let ones = (vx % 10.0) as u8;
+
+                self.ram[self.i_reg as usize] = hundreds;
+                self.ram[(self.i_reg + 1) as usize] = tens;
+                self.ram[(self.i_reg + 2) as usize] = ones;
+            }
+            (0xF, _, 5, 5) => { //FX55 Store V0 THROUGH Vx into I
+                let x = digit2 as usize;
+                let i = self.i_reg as usize;
+                for index in 0..=x {
+                    self.ram[i + index] = self.v_reg[index];
+                }
+            }
+            (0xF, _, 6, 5) => { //FX65 Load I into V0 through Vx
+                let x = digit2 as usize;
+                let i = self.i_reg as usize;
+                for index in 0..=x {
+                    self.v_reg[index] = self.ram[i + index];
                 }
             }
             (_, _, _, _) => unimplemented!("Unimplemented opcode: {}", op),
         }
-    }
-    
-    fn push(&mut self, val: u16){
-        self.stack[self.sp as usize] = val;
-        self.sp += 1;
-    }
-
-    fn pop(&mut self) -> u16{
-        self.sp -=1;
-        self.stack[self.sp as usize]
     }
 }
